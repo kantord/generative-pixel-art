@@ -75,10 +75,6 @@ struct Args {
     #[arg(short = 'w', long, default_value_t = 64)]
     width: u32,
 
-    /// Target pixel‑art height (px)
-    #[arg(short = 'H', long, default_value_t = 64)]
-    height: u32,
-
     /// Number of colours in the palette
     #[arg(short = 'p', long, default_value_t = 16)]
     palette_size: usize,
@@ -106,20 +102,24 @@ struct Individual {
     palette: Vec<[u8; 3]>, // length = palette_size
     pixels: Vec<u8>,       // length = width * height, each value 0..palette_size‑1
     fitness: f32,          // lower == better (mean‑squared error)
+    width: u32,
+    height: u32,
 }
 
 impl Individual {
-    fn random<R: Rng>(rng: &mut R, palette_size: usize, n_pixels: usize) -> Self {
+    fn random<R: Rng>(rng: &mut R, palette_size: usize, width: u32, height: u32) -> Self {
         let palette = (0..palette_size)
             .map(|_| [rng.random::<u8>(), rng.random::<u8>(), rng.random::<u8>()])
             .collect();
-        let pixels = (0..n_pixels)
+        let pixels = (0..(width * height) as usize)
             .map(|_| rng.random_range(0..palette_size as u8))
             .collect();
         Self {
             palette,
             pixels,
             fitness: f32::MAX,
+            width,
+            height,
         }
     }
 
@@ -155,6 +155,8 @@ impl Individual {
             palette,
             pixels,
             fitness: f32::MAX,
+            width: self.width,
+            height: self.height,
         }
     }
 
@@ -176,8 +178,8 @@ impl Individual {
     }
 
     /// Render individual into RgbImage.
-    fn render(&self, width: u32, height: u32) -> RgbImage {
-        let mut im = ImageBuffer::new(width, height);
+    fn render(&self) -> RgbImage {
+        let mut im = ImageBuffer::new(self.width, self.height);
         for (i, pixel) in im.pixels_mut().enumerate() {
             let [r, g, b] = self.palette[self.pixels[i] as usize];
             *pixel = Rgb([r, g, b]);
@@ -187,11 +189,11 @@ impl Individual {
 }
 
 // ---------------- Genetic algorithm driver -----------------------------------
-fn evolve(args: &Args, target: &[[u8; 3]]) -> Individual {
-    let n_pixels = (args.width * args.height) as usize;
+fn evolve(args: &Args, target: &[[u8; 3]], width: u32, height: u32) -> Individual {
+    let n_pixels = (width * height) as usize;
     let mut rng = rng();
     let mut population: Vec<Individual> = (0..args.population)
-        .map(|_| Individual::random(&mut rng, args.palette_size, n_pixels))
+        .map(|_| Individual::random(&mut rng, args.palette_size, width, height))
         .collect();
 
     // Evaluate initial pop
@@ -250,24 +252,30 @@ fn evolve(args: &Args, target: &[[u8; 3]]) -> Individual {
 }
 
 // ---------------- Utility -----------------------------------------------------
-fn load_and_resize(path: &PathBuf, w: u32, h: u32) -> Result<Vec<[u8; 3]>> {
-    let img = image::open(path)?.resize_exact(w, h, FilterType::Nearest);
-    let mut v = Vec::with_capacity((w * h) as usize);
+fn load_and_resize(path: &PathBuf, target_width: u32) -> Result<(Vec<[u8; 3]>, u32, u32)> {
+    let img = image::open(path)?;
+    let (orig_width, orig_height) = img.dimensions();
+    let aspect_ratio = orig_height as f32 / orig_width as f32;
+    let target_height = (target_width as f32 * aspect_ratio).round() as u32;
+    
+    let img = img.resize_exact(target_width, target_height, FilterType::Nearest);
+    let mut v = Vec::with_capacity((target_width * target_height) as usize);
     for (_, _, p) in img.pixels() {
         v.push([p[0], p[1], p[2]]);
     }
-    Ok(v)
+    Ok((v, target_width, target_height))
 }
 
 // ---------------- MAIN --------------------------------------------------------
 fn main() -> Result<()> {
     let args = Args::parse();
-    let target_pixels = load_and_resize(&args.input, args.width, args.height)?;
+    let (target_pixels, width, height) = load_and_resize(&args.input, args.width)?;
+    println!("Resizing to {}x{} pixels", width, height);
 
-    let best = evolve(&args, &target_pixels);
+    let best = evolve(&args, &target_pixels, width, height);
 
     // Save rendered result
-    let rendered = best.render(args.width, args.height);
+    let rendered = best.render();
     rendered.save(&args.output)?;
 
     // Also write the palette as a horizontal strip
